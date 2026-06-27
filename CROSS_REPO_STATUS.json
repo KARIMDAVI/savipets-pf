@@ -1,0 +1,209 @@
+{
+  "last_updated": "2026-06-26T22:15:00Z",
+  "note": "Claude writes this file. Never edit manually. Stop hook enforces freshness.",
+  "items": [
+    {
+      "id": "IOS-SCHEDULE-EMPTY",
+      "status": "DONE",
+      "repo": "savipets-ios",
+      "note": "FIXED 2026-06-26 \u2014 Combine sink added to PetOwnerScheduleViewModel.init(); objectWillChange.send() + generateBookingInsights() fire on each Firestore snapshot. Commit pending."
+    },
+    {
+      "id": "DEPLOY-5-FUNCTIONS",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "5 functions written but not deployed. Run: firebase deploy --only functions:midVisitCheckIn,functions:onChatMessageCreated,functions:notifyOwnerOnVisitStatusChange,functions:onChangeRequestCreated,functions:onTimeOffRequestCreated && firebase deploy --only firestore:indexes"
+    },
+    {
+      "id": "PAYMENT-E2E",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "Square code deployed but end-to-end never run. Test: book \u2192 pay test card 4532 0151 2535 3010 \u2192 Square Dashboard \u2192 invoice \u2192 refund \u2192 auditLog"
+    },
+    {
+      "id": "EMAIL-BOOK",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "No booking confirmation email fires on booking.created. Owner has no idea booking was created."
+    },
+    {
+      "id": "EMAIL-RETRY",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "Email verification has no retry queue. Transient SMTP failures (~1-2%) leave users stuck at signup."
+    },
+    {
+      "id": "ANDROID-PUBPROFILES",
+      "status": "PENDING",
+      "repo": "savipets-android",
+      "note": "CRITICAL \u2014 actively broken in production. 4 lookups still query users/ directly: SitterDataFetcher, BookingDetailViewModel, ChatViewModelDisplayName (x2), RecurringBookingService. Shows 'Unable to load sitters' + 'User {uid}' bugs. Root cause: firestore.rules commit 67bc1b4 removed petSitter read exception \u2014 owners can no longer read users/{sitterId}. iOS reference: commit d62aeb6e5. Fix: replace all 4 with publicProfiles lookups. List query needs both bizId and role constraints."
+    },
+    {
+      "id": "RULES-ADMIN-LIST-FIX",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "firestore.rules: removed sameBizId() from isAdmin() list condition. sameBizId() references resource.data.bizId which Firestore denies without a matching query constraint \u2014 was breaking ALL web-admin user queries. Deploy: firebase deploy --only firestore:rules"
+    },
+    {
+      "id": "ANDROID-GPS-RUNTIME",
+      "status": "PENDING",
+      "repo": "savipets-android",
+      "note": "GPSConsentService.kt + GPSConsentSheet code complete. Runtime device verification not done. visitTracking writes are blocked without consent (Firestore rule: commit d5fec7e)."
+    },
+    {
+      "id": "ANDROID-PHASE7-RUNTIME",
+      "status": "PENDING",
+      "repo": "savipets-android",
+      "note": "Phase 7 P3 code complete (commits 9e313c6 + 39fa994). Runtime pending: spot-check new booking bizId in Firestore; verify reschedule and time-off docs created from device; verify invoice FCM push opens correctly."
+    },
+    {
+      "id": "IOS-GIT-PUSH",
+      "status": "DONE",
+      "repo": "savipets-ios",
+      "note": "Pushed. Commit 4035386fe is live on origin/main.",
+      "done_at": "2026-06-25"
+    },
+    {
+      "id": "IOS-SERVICECARDS",
+      "status": "PENDING",
+      "repo": "savipets-ios",
+      "note": "Unstaged change in ServiceCards.swift (Picker \u2192 chip scrollview for transport service type). Pre-existing, not part of P2/P3/P4. Needs its own commit."
+    },
+    {
+      "id": "SYNC-DIRECTMESSAGING",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "syncPublicProfile trigger doesn't sync directMessaging.allowOwnerChats. iOS defaults to true if absent \u2014 safe but silent divergence if sitter disables messaging. LOW priority."
+    },
+    {
+      "id": "PHASE7-CLEANUP",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "Run on 2026-07-22 or after: delete clients/ collection, remove rules, remove index entries, delete functions/src/features/clients/, remove 5 exports from index.ts. Phase 7 pre-flight checks all PASSED."
+    },
+    {
+      "id": "GPS-CONSENT-RULES",
+      "status": "DONE",
+      "done_at": "2026-06-25",
+      "repo": "savipets-backend",
+      "commit": "d5fec7e",
+      "note": "visitTracking create gated on visitTrackingConsent/{uid}.consentGiven==true in Firestore rules."
+    },
+    {
+      "id": "GPS-HISTORICAL-BACKFILL",
+      "status": "DONE",
+      "done_at": "2026-06-25",
+      "repo": "savipets-backend",
+      "commit": "707c337",
+      "note": "backfillGpsTtl onCall CF deployed. All 16 pre-TTL visitTracking docs confirmed stamped with expireAt."
+    },
+    {
+      "id": "PITR",
+      "status": "DONE",
+      "done_at": "2026-06-23",
+      "repo": "savipets-backend",
+      "note": "Firebase Console: 7-day PITR + 98-day daily snapshots enabled."
+    },
+    {
+      "id": "DISASTER-RECOVERY",
+      "status": "DONE",
+      "done_at": "2026-06-23",
+      "repo": "savipets-backend",
+      "commit": "f716544",
+      "note": "DISASTER_RECOVERY.md authored in savipets-backend/. 6 failure scenarios."
+    },
+    {
+      "id": "MONITORING-ALERTS",
+      "status": "DONE",
+      "done_at": "2026-06-23",
+      "repo": "savipets-backend",
+      "note": "4 Cloud Monitoring alert policies live: error rate, p99, Firestore reads, auth failures."
+    },
+    {
+      "id": "CHAT-NAMES",
+      "status": "DONE",
+      "done_at": "2026-06-25",
+      "repo": "all",
+      "note": "participantNames map written at conversation create (iOS commit 28943d9ca). Android reads in MessageListenerManager.kt. Web-admin reads in all 4 mapper sites."
+    },
+    {
+      "id": "SEC-CLAIMS",
+      "status": "DONE",
+      "done_at": "2026-06-25",
+      "repo": "all",
+      "note": "Backend writes claimsUpdatedAt (commit 4ecf8d4). iOS TokenRefreshManager subscribes (commit 28943d9ca). Android TokenRefreshManagerImpl mirrors it (commits 9e313c6, 39fa994)."
+    },
+    {
+      "id": "GDPR-DEL",
+      "status": "DONE",
+      "done_at": "2026-06-25",
+      "repo": "all",
+      "note": "deleteUserData CF deployed (commit 67de80f). iOS deleteAccountViaCF() wired (commit 28943d9ca). Android OwnerProfileViewModel calls CF."
+    },
+    {
+      "id": "EMAIL-INV",
+      "status": "DONE",
+      "done_at": "2026-06-23",
+      "repo": "savipets-backend",
+      "commit": "9c741df",
+      "note": "Direct SMTP in all 4 invite paths. No Firebase Email Extension dependency."
+    },
+    {
+      "id": "PUBPROFILES-MIGRATION",
+      "status": "DONE",
+      "done_at": "2026-06-24",
+      "repo": "savipets-ios",
+      "commit": "d62aeb6e5",
+      "note": "iOS migrated to publicProfiles for all cross-user lookups. Android still PENDING (ANDROID-PUBPROFILES)."
+    },
+    {
+      "id": "BUG1-STALE-PET-NAMES",
+      "status": "DONE",
+      "done_at": "2026-06-26",
+      "repo": "savipets-backend",
+      "note": "onPetNameChanged trigger written \u2014 patches pets[] on pending/scheduled/approved bookings when pets/{id}.name changes. Completed/cancelled keep historical name. functions/src/features/pets/triggers/onPetNameChanged.ts. Deploy: firebase deploy --only functions:onPetNameChanged"
+    },
+    {
+      "id": "BUG2-ADMIN-BOOKING-SITTER-NAME",
+      "status": "DONE",
+      "done_at": "2026-06-26",
+      "repo": "savipets-web-admin",
+      "note": "Already fixed in code — getSitterName() called at lines 58, 242; sitterName written at lines 71, 110, 254, 343. Verified code reads match. Cross-repo TODO was stale."
+    },
+    {
+      "id": "BOOKING-CARD-SCHEDULEDTIME",
+      "status": "DONE",
+      "done_at": "2026-06-26",
+      "repo": "savipets-web-admin",
+      "commit": "pending",
+      "note": "Single admin booking (createAdminBooking) now derives + writes scheduledTime string (\"h:mm a\" via toLocaleTimeString en-US) so iOS BookingCardInline.swift:20 shows the time instead of 'at '. Recurring path already wrote it. Verified: pets already stored as names (extractPetNames) — empty avatars in repro = admin didn't pick pets, not a bug. serviceType slug IS the correct architecture — iOS must map it (see IOS-BOOKING-CARD-SLUG). tsc -b passes."
+    },
+    {
+      "id": "IOS-BOOKING-CARD-SLUG",
+      "status": "PENDING",
+      "repo": "savipets-ios",
+      "note": "SUPERSEDED by SERVICENAME-SPLIT schema. Admin bookings render raw serviceType slug ('dog-walking') as card title — BookingCardInline.swift:16 prints booking.serviceType verbatim. Fix: (1) WRITE — store catalog SLUG in serviceType + snapshot catalog name into new serviceName field at booking create (BookingCRUDService.swift:43, catalog BookingModels.swift:96); (2) READ — render serviceName ?? humanize(serviceType), idempotent resolver handles all legacy doc classes without migration. Design: savipets-web-admin/docs/architecture/SERVICE_NAMING.md. Full detail in CROSS_REPO_TODOS.md."
+    },
+    {
+      "id": "WEBADMIN-SERVICENAME-SPLIT",
+      "status": "DONE",
+      "done_at": "2026-06-26",
+      "repo": "savipets-web-admin",
+      "commit": "pending",
+      "note": "Schema split serviceType (machine key/slug) + serviceName (frozen display snapshot). web-admin writes both on create (booking, recurring series, recurring bookings, visits/{id}); reads via resolveServiceName(booking) helper at all display sites (table, drawer, daysheet, calendar, list, timeline, my-schedule, invoices summary + modal line items). Design doc: docs/architecture/SERVICE_NAMING.md. tsc -b clean, 427 tests pass."
+    },
+    {
+      "id": "ANDROID-SERVICENAME-SPLIT",
+      "status": "PENDING",
+      "repo": "savipets-android",
+      "note": "Mirror serviceType+serviceName split. WRITE: slug to serviceType + snapshot catalog name to serviceName at booking create (FirebaseBookingRepository.createBooking, RecurringSeriesRepositoryImpl). READ: serviceName ?? humanize(serviceType) at all booking display sites. Design: savipets-web-admin/docs/architecture/SERVICE_NAMING.md."
+    },
+    {
+      "id": "BACKEND-SERVICENAME-BACKFILL",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "(1) Document serviceType+serviceName split in PLATFORM_ARCHITECTURE.md + contracts.md; field rule: serviceName immutable after create (frozen snapshot). (2) One-time backfill CF for Class-2 docs (serviceType is a human label, not ^[a-z0-9-]+$): set serviceName=label then serviceType=slugify via catalog; idempotent, skip docs with serviceName. Dirty analytics = sales problem, required. (3) Square/invoice line-item descriptions must read serviceName ?? humanize(serviceType). Design: savipets-web-admin/docs/architecture/SERVICE_NAMING.md."
+    }
+  ],
+  "last_updated": "2026-06-26T23:58:00Z"
+}
