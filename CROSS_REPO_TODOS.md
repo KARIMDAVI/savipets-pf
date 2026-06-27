@@ -284,6 +284,286 @@ Shared handoff log for all SaviPets repos.
   iOS/Android-created bookings still render correctly (resolver pass-through). Analytics groups by slug
   with no fragmentation after backfill.
 
+### [2026-06-27] CATALOG SSOT + SERVER-ENFORCED PRICING — multi-phase, canonical deploy order backend → mobile → web-admin
+- ⚠️ SPLIT (2026-06-27): this multi-phase effort is now TWO independently-executable plan docs in
+  `savipets-backend/docs/plans/` (original violated the >3-repo / >5-phase split rule):
+  - `pricing-authority.md` — Doc 1, INTERNAL cadence: Phase 1 (validators) → 2 (callable+engine+charge-site
+    fix+interim catalog-price-floor) → web-admin 3 (UI) → 5 (seed) → 6 (logging).
+  - `client-lockdown.md` — Doc 2, MOBILE-RELEASE-CLOCK cadence: Phase 4 (iOS+Android callable migration) →
+    4b (rules block client create + lock price field). 4b is the ONLY full close of the live vuln.
+  Phase numbers below are unchanged — they map 1:1 into the two docs. Execute from the docs; this section
+  remains the per-phase cross-repo record.
+- Triggered by: savipets-web-admin session 2026-06-27. Full plan + canonical schemas authored this
+  session. Web-admin Phase 0 slice (dropdown fix + AdminBookingCreate dedupe) is DONE (commit pending).
+- Problem: service definitions + pricing live hardcoded in iOS (`BookingModels.swift`,
+  `BookingPriceCalculator.swift`) and Android (`ServiceOptionsData.kt`, `TransportationType.kt`,
+  `BookingPriceCalculator.kt`) AND in a Firestore `services` collection (4 placeholder docs). They have
+  drifted: iOS prices "Quality Time 60 min" at $44.99, Android at $39.99 — CANONICAL = $44.99 (discard
+  Android's $39.99). No `createBooking` callable exists; iOS/Android/web-admin all write `serviceBookings`
+  directly with a client-supplied `price` string, and Square bills it (`applePayments.ts:66`
+  → `Math.round(data.price*100)`). Any client can fabricate a price today.
+- Target architecture: Firestore `services/{id}` is single source of truth (managed by web-admin, read by
+  all clients at runtime). A server `createBooking` callable fetches the catalog entry, runs the pricing
+  formula SERVER-side, snapshots serviceName+serviceType+pricingEngineVersion, writes the booking. No
+  client ever sends a final price. Formula identical for all tenants; params differ per service/tenant.
+
+#### Canonical `services/{id}` schema (the contract every repo implements)
+```ts
+{ bizId, category: 'dog-walks'|'pet-sitting'|'overnight'|'transportation',
+  serviceType /* UNIQUE slug: potty-break, quick-walk, quality-time, walk-play, cat-care-30, pet-taxi… */,
+  name /* display, snapshotted onto bookings */, description?, duration /* min; 0 when derived */,
+  pricingModel: 'flat'|'tiered'|'distance-based',
+  pricingParams: { basePrice?, pricePerAdditionalPet?, petCountTiers?, petSizeSurcharges?,
+                   nightTiers?, baseMilesCovered?, perMileRate?, perExtraPetRate?, perPetRate? },
+  shortNoticeSurcharge?, shortNoticeWindowHours?, firstTimeClientDiscountPct?,
+  addOns?: {id,name,price}[], isActive, displayOrder, requiresApproval, color?, createdAt, updatedAt }
+```
+
+#### Phase 1 — backend: extend service validators (must deploy BEFORE web-admin Phase 3)
+- Source repo: savipets-web-admin
+- Target repo: savipets-backend
+- File: `functions/src/features/services/service.validators.ts`
+- Change: extend `serviceFormSchema` + `updateServiceSchema` with `category`, `pricingModel`,
+  `pricingParams` (discriminated by model), `shortNoticeSurcharge`, `shortNoticeWindowHours`,
+  `firstTimeClientDiscountPct`. CRITICAL: without this, web-admin's new fields are silently stripped by
+  `.parse()` before write.
+- Deploy: `firebase deploy --only functions:createService,functions:updateService`
+- Status: PENDING
+
+#### Phase 2 — backend: createBooking callable + pricing engine + Square price trust (NO rules change here)
+- Source repo: savipets-web-admin
+- Target repo: savipets-backend
+- Priority: HIGH — load-bearing security piece (closes price-fabrication hole)
+- ⚠️ MOST COMPLEX ITEM IN THE PLAN. This single callable carries EVERY security control. Do NOT code
+  it from memory. Treat the checklist below as a hard pre-deploy gate — tick each box against the
+  detailed spec that follows, line by line, BEFORE `firebase deploy`. An unchecked box is a blocker.
+
+  PRE-DEPLOY REVIEW CHECKLIST (createBooking callable)
+  Authz — token-derived, NEVER from request body:
+  - [ ] `isAdmin = request.auth?.token.role === 'admin'` only; NO `isAdmin` input field exists
+  - [ ] `clientId = isAdmin ? (input.clientId ?? uid) : uid` (non-admins book only for themselves)
+  - [ ] `bizId` from caller's token claim, asserted `=== services.bizId`; any body-sent bizId stripped
+  - [ ] `sitterId` admin-only; stripped/ignored for non-admins
+  - [ ] `adminPriceOverride` applied only when `isAdmin && override != null`; bounds `0 <= x <= 10000`
+  Input validation — before fetch / before compute:
+  - [ ] `serviceId` doc-id-shape (alnum+hyphen, ≤128) validated BEFORE Firestore fetch; missing → `not-found`
+  - [ ] `services.isActive === true` asserted; `requiresApproval === true` → `failed-precondition`
+  - [ ] `scheduledDate` TYPE-checked (one wire format) before range; reject NaN/obj/array, past (60s tol), >1yr
+  - [ ] `paymentMethod` allowlist-validated before any downstream
+  - [ ] `pets[]` 1–10; `distanceMiles` 0.1–500 (distance-based only)
+  - [ ] `addOnIds` ≤10, DEDUPED, each exists on THIS service doc, price summed from CATALOG (never client-sent)
+  - [ ] `specialInstructions`/`address` length-capped (1000 chars) server-side
+  Pricing + transaction integrity:
+  - [ ] price computed server-side via pricingEngine model switch — client-sent price NEVER used
+  - [ ] `tiered` with missing/0 `nights` rejected (no NaN); `flat` ignores `distanceMiles`
+  - [ ] `Number.isFinite(price) && price > 0` guard before ANY `Math.round(price*100)`
+  - [ ] first-time discount: read flag → compute → write booking → set `firstTimeDiscountUsed` ALL in ONE txn
+  - [ ] idempotency doc `${uid}:${key}` written INSIDE the same txn; key validated UUID v4; 24h TTL;
+        replay returns the ORIGINAL `{bookingId, price}`
+  - [ ] visit doc (when `sitterId` set) written in the SAME transaction
+  - [ ] `serviceName` + `serviceType` + `pricingEngineVersion` snapshotted onto the booking doc
+  Payment charge site (`applePayments.ts`):
+  - [ ] charge reads `serviceBookings/{bookingId}.price` (catalog-derived), NEVER `data.price`
+  - [ ] booking-doc read is null-safe → retriable error, never $0 charge / crash
+  - [ ] owner-or-admin ownership check on `bookingId` at the charge site
+  Engine versioning + audit:
+  - [ ] `ENGINE_VERSION` const + "bump on ANY formula change" comment + Jest snapshot test pins per-model output
+  - [ ] `writeAuditLog()` on every override / first-time-discount grant / bizId-mismatch / bounds rejection
+  - [ ] `enforceAppCheck: true` (defense-in-depth ONLY — not a primary control)
+  Deploy gates:
+  - [ ] `firestore.rules` UNTOUCHED in this phase (rules lockdown deferred to Phase 4b)
+  - [ ] deploy scope is exactly `createBooking,createRecurringBooking,processApplePayPayment`
+  - [ ] rollback path confirmed (redeploy prior build; direct client writes stay unaffected)
+
+- Files:
+  - NEW `functions/src/features/bookings/pricingEngine.ts` — pure functions for flat/tiered/distance-based
+    + short-notice surcharge + first-time discount. Reused by createBooking AND recurring path (ONE module).
+    Export `const ENGINE_VERSION = "v1"` (comment: "bump on ANY formula change"). Jest SNAPSHOT test pins
+    output per model for fixed inputs — a formula change without a version bump fails the snapshot.
+  - NEW `functions/src/features/bookings/createBooking.ts` (onCall) — export from `functions/src/index.ts`.
+  - Recurring: `createRecurringBooking` callable using the same engine; replaces direct client writes.
+  - `applePayments.ts:66` — stop trusting client `data.price`; read price from the booking doc the callable
+    wrote (server-authoritative). USE THE EXISTING `parseBookingPrice()` util
+    (`functions/src/savipets-core/utils/parseBookingPrice.ts`) — it already null-guards type
+    (priceInCents → price number → price string → 0). Do NOT duplicate that logic. NULL-SAFE: if the
+    booking doc isn't found (eventual-consistency window), reject with a RETRIABLE error — NEVER fall
+    through to a $0 charge or crash. Also add the owner-or-admin ownership check on `bookingId` and the
+    interim catalog-price-floor (see Doc 1 `pricing-authority.md` Phase 2 charge-site checklist).
+- createBooking input contract:
+  `{ serviceId, pets[], scheduledDate, paymentMethod, clientId?(admin-only), sitterId?(admin-only),
+     specialInstructions?, address?, distanceMiles?(distance-based), nights?(tiered), addOnIds?(IDs only,
+     max 10), adminPriceOverride?(admin-only), idempotencyKey(UUID v4) }`. NO bizId, NO isAdmin flag in input.
+- Server steps: 0) resolve clientId (admin→input||uid, else uid) + bizId from CALLER's token claim — NOT
+  from body. 1) fetch services/{serviceId}; assert services.bizId === resolved bizId; assert isActive===true.
+  2) validate scheduledDate type + reject past (60s tolerance) / >1yr. 3) requiresApproval===true → reject
+  `failed-precondition`. 4) compute price (model switch + surcharge + first-time discount). 5) snapshot
+  serviceName+serviceType+pricingEngineVersion. 6) write serviceBookings/{uuid} (+ visit if sitterId) in ONE
+  transaction. 7) return {bookingId, price}.
+- MANDATORY authz/validation hardening (these are authz bypasses — fix before Phase 2 ships):
+  - `isAdmin = request.auth?.token.role === 'admin'` (custom claim; matches `requireAdmin()` in
+    `adminServices.ts:22`). NO `isAdmin: true` input field.
+  - clientId: `isAdmin ? (input.clientId ?? uid) : uid` — non-admins book only for themselves.
+  - bizId from caller's token (`request.auth.token.bizId`), NEVER body; admins only book within own bizId.
+  - adminPriceOverride: `(isAdmin && override != null) ? override : computedPrice` — use `!= null` (0 is a
+    legit $0 comp), bounds `0 <= override <= 10000`. Unit test: admin sends 0 → booking at price 0.
+  - sitterId: admins only; non-admins stripped/ignored.
+  - serviceId: validate doc-id shape (alphanumeric+hyphen, ≤128) BEFORE fetch; missing doc → `not-found`.
+  - paymentMethod: allowlist-validate before downstream.
+  - distanceMiles: bounds 0.1–500. pets[]: 1–10. addOnIds: ≤10, look up each in services.addOns (unknown
+    id → reject `invalid-argument`), sum CATALOG price (never client-sent).
+  - specialInstructions/address: server-side length cap (1000 chars).
+  - App Check: `enforceAppCheck: true` (defense-in-depth, NOT a primary control — attests app instance,
+    not user).
+  - idempotencyKey: doc id `${uid}:${key}`, record write INSIDE the same transaction, 24h TTL.
+  - FIRST-TIME DISCOUNT RACE: ONE transaction reads `users/{clientId}.firstTimeDiscountUsed`, computes price
+    (discount only if unset), writes serviceBookings/{uuid}, sets `firstTimeDiscountUsed: true` — all atomic.
+    Kills the race AND the orphaned-flag bug. Do NOT set the flag in a separate write; do NOT count completed
+    bookings.
+  - pricingEngineVersion stamped on every booking doc (audit trail for disputes).
+- SECURITY REVIEW ADDENDUM (2026-06-27 — security-reviewer agent VERIFIED every claim against source;
+  only code-proven [CERTAIN] items kept, speculative/disproven items DROPPED — see "Dropped" below):
+  - [CERTAIN] EXISTING VULN #1 — client-controlled charge amount. `applePayments.ts:66` does
+    `amount: Math.round(data.price * 100)` where `data.price` is raw callable input
+    (`applePayments.ts:34`). The only guard is `squarePaymentValidator.ts:73-75` (`typeof === 'number'
+    && > 0`) — no booking-doc read, no catalog lookup, no recompute. Any authenticated caller with a
+    connected Square account can charge an arbitrary amount (e.g. $0.01) for any service. This is the
+    SAME root cause the whole plan closes. FIX (Phase 2): load `serviceBookings/{bookingId}` server-side
+    and charge `Math.round(booking.price * 100)` (catalog-derived), NEVER `data.price`; null-safe per the
+    Phase 2 note above. SUB-FINDING [CERTAIN]: `processApplePayPayment` checks only `request.auth` exists
+    (`applePayments.ts:29`) — it does NOT verify the caller owns `bookingId`. Whether a caller can target
+    ANOTHER user's booking is [Likely] exploitable but the ownership path (`updateBookingPaymentStatus`)
+    was not traced — add an owner-or-admin check on `bookingId` at the charge site.
+  - [CERTAIN] EXISTING VULN #2 — `price` unrestricted in firestore.rules. The `serviceBookings` block
+    (`firestore.rules:221-306`) never mentions `price` (grep across the whole rules file = 0 hits). A
+    non-admin email-verified owner create (lines 229-246) constrains clientId/sitterId/bizId + a key
+    blocklist but lets `price` be anything. Rules CANNOT compute a catalog price, so the real close is
+    moving price authority off the client (Phase 2 callable + Phase 4b rules block client create).
+  - DESIGN REQUIREMENTS for the NOT-YET-WRITTEN callable/engine (acceptance criteria, NOT current vulns):
+    - Per-model field-interplay validation at catalog-write AND booking-time: `tiered` with `nights`
+      missing/0 must reject (a divide-by-zero → NaN → `Math.round(NaN*100)` broken charge); a `flat`
+      service receiving `distanceMiles` must ignore it. Final `Number.isFinite(price) && price > 0` guard
+      before any `Math.round(price*100)` — reject, never charge NaN.
+    - Audit-log via `writeAuditLog()`: every `adminPriceOverride` (who/amount/bookingId/serviceId), every
+      first-time-discount grant, every bizId-mismatch/bounds rejection. Stamp `pricingEngineVersion` as a
+      structured Cloud Logging field on every create.
+    - addOnIds: DEDUPE before sum (same id twice → double charge); each id must exist on THIS service doc.
+    - idempotency replay RETURNS the original `{bookingId, price}` (transparent retry); validate
+      `idempotencyKey` is a real UUID v4 (fixed/empty key would self-collapse all of a user's bookings).
+    - scheduledDate: reject `NaN`/`"abc"`/`{}`/array at the TYPE check before range check; pick ONE wire
+      format (ISO 8601 OR Unix ms), reject others.
+    - Per-uid create rate limit (token bucket in the idempotency collection) — fast-follow; App Check is
+      app-instance attestation, not a user-level control.
+  - DROPPED (security-reviewer disproved against current code — do NOT carry these forward):
+    - ✗ "forge `adminCreated`/`skipPaymentValidation` to bypass payment validation" — FALSE. Rules
+      `firestore.rules:234-244` blocklist `adminCreated`+`createdVia` on the non-admin create path (ADR
+      BOOK-01); `skipPaymentValidation` exists nowhere in either repo.
+    - ✗ "`setPlatformClaims` resurrects stale `clientId`/admin on re-auth (MEMORY blocker #1)" — ALREADY
+      FIXED. `setPlatformClaims.ts:98-100` strips `clientId` before the spread; `role` is recomputed from
+      Firestore + validated against `VALID_ROLES` (87-91) and written AFTER the spread (115), so a demoted
+      admin gets the new role — no `admin` resurrection. (Residual nit only: allowlist-construct the claim
+      object instead of spreading, so no unknown key survives.) The callable using JWT `token.role` is
+      simply matching the rules' EXISTING correct pattern (`firestore.rules:35-43`) — not a new dependency.
+    - ✗ "non-admin booking via client-side authz" — backend authz IS a JWT claim (`firestore.rules:35-43`,
+      `token.role == 'admin'`; legacy `admin:true` path deliberately removed). Only the web-admin UI
+      `isAdmin` (`AuthContext.tsx:75`) is a Firestore-field check — and that is UI gating, harmless on its
+      own. Keep only the narrow true note; drop the "forge a booking" half.
+- ACCEPTED WINDOW (Phase 2→3): web-admin still writes via direct setDoc with admin-typed price until Phase 3;
+  Square reads the doc price → bills admin-typed amount. Acceptable (admins trusted), time-boxed, closes at
+  Phase 3. DO NOT touch `firestore.rules` here — blocking client serviceBookings create would break every
+  live iOS/Android instantly (deferred to Phase 4b). The callable is ADDITIVE; coexists with direct writes.
+- Note: existing `CreateBookingSchema.serviceType` enum (Walk|Sitting|Boarding) is unrelated to catalog
+  slugs — callable keys off serviceId.
+- Deploy: `firebase deploy --only functions:createBooking,functions:createRecurringBooking,functions:processApplePayPayment`
+- Rollback: redeploy prior function build; because Phase 2 rules are unchanged, direct client writes keep
+  working — blast radius is "the new callable path," not "all booking creation."
+- Status: PENDING
+
+#### Phase 4 — iOS: catalog fetch + callable migration + drop hardcoded pricing (after Phase 1+2 live)
+- Source repo: savipets-web-admin
+- Target repo: savipets-ios
+- Change: fetch `services` at session start (reuse `RemoteConfigManager.swift:50` fetch pattern), cache for
+  session. `BookingModels.swift` / `ServiceOptionsData` / `TransportationType` become DISPLAY-ONLY (no
+  prices/formulas). `BookingCRUDService.swift` + `RecurringBookingService.swift` call `createBooking`
+  callable; delete `BookingPriceCalculator` price logic (keep only a display estimate from catalog params
+  if desired). Tag callable-created bookings `createdVia: 'callable'` (needed for the Phase 4b soft gate).
+- Deploy: App Store (slow channel; backend stays backward-compatible until both mobile ship).
+- Status: PENDING
+
+#### Phase 4 — Android: catalog fetch + callable migration + drop hardcoded pricing (after Phase 1+2 live)
+- Source repo: savipets-web-admin
+- Target repo: savipets-android
+- Change: add catalog fetch at app init (none exists today), cache for session. `ServiceOptionsData.kt` /
+  `TransportationType.kt` DISPLAY-ONLY. `FirebaseBookingRepository.kt` + `RecurringSeriesRepositoryImpl.kt`
+  call the callable; remove `BookingPriceCalculator.kt` price logic. Tag callable-created bookings
+  `createdVia: 'callable'`.
+- Deploy: Play Store.
+- Status: PENDING
+
+#### Phase 4b — backend: firestore.rules block client serviceBookings/recurring create (ONLY after BOTH mobile live for all users)
+- Source repo: savipets-web-admin
+- Target repo: savipets-backend
+- Priority: HIGH — this is what actually closes the price-fabrication hole.
+- GATE (pick one, whichever lands first): (a) HARD — force-update/min-version in both apps refuses to create
+  on a build older than the callable build → deploy 4b immediately; OR (b) SOFT — legacy direct-write creates
+  < 1% of total creates over a trailing 7-day window (measure via missing `createdVia: 'callable'` tag) for 7
+  consecutive days. Do NOT deploy on "feels migrated."
+- SECURITY REVIEW CAVEAT (2026-06-27): PREFER the HARD min-version gate (a). The SOFT <1% gate is UNSOUND as
+  a SECURITY control — it measures honest migrators, not attackers. The price-fabrication hole is open to
+  anyone running an old/modified build for as long as direct writes are allowed; "1% of honest traffic" says
+  nothing about a motivated attacker who pins the legacy path on purpose. Use the soft gate only to schedule
+  the user-experience side (avoid breaking stale installs), NOT as the security close. INTERIM MITIGATION TO
+  SHIP IN PHASE 2 (do not wait for 4b): at the charge site (`applePayments.ts`), enforce a CATALOG-PRICE-FLOOR
+  — re-derive the expected minimum from `services/{serviceId}` and reject/flag any booking whose stored
+  `price` is below it, and ALERT on every sub-floor charge. This shrinks the open-hole blast radius during
+  the entire Phase 2→4b window from "any fabricated price" to "at most a catalog-valid price."
+- Change: `firestore.rules` — `serviceBookings` and `recurringSeries`/`recurringSeriesBatches` create → BLOCK
+  client create (callable uses Admin SDK, bypasses rules). Keep client cancel/update-own. AUDIT UPDATE RULES
+  TOO: client `update` on own booking must forbid `price`/billing-field mutation (else client creates via
+  callable at correct price, then updates own price to 0). Field-level lockdown on price mandatory.
+- Deploy: `firebase deploy --only firestore:rules`. Verify: direct client create rejected; callable create
+  succeeds; client update to `price` on own booking rejected.
+- Status: PENDING
+
+#### Phase 5 — backend/data: seed real menu + delete placeholders (GATED on web-admin Phase 3 deployed + confirmed)
+- Source repo: savipets-web-admin
+- Target repo: savipets-backend (Firestore data)
+- Seed real menu, UNIQUE slugs, canonical prices:
+  - Dog Walks (flat): potty-break(15,$17.99), quick-walk(30,$24.99), quality-time(60,$44.99 CANONICAL —
+    Android $39.99 is the drift bug, discard), walk-play(120,$75).
+  - Pet Sitting (flat): cat-care-30($25), cat-care-60($45), birds-care-30($28.95), critter-care-30($28.95).
+  - Overnight (tiered nightTiers): [1-6 $140, 7-12 $130, 13+ $120].
+  - Transportation (distance-based): pet-taxi(base $35 / 5mi incl / $1.50 mi / $10 extra pet),
+    pet-express($350/pet + $2.25/mi), shuttle($250/pet + $0.75/mi), flight-companion($1000/pet + $0.50/mi).
+- SEED VERIFICATION: after seeding, run a read-back query asserting every doc matches the seed script's
+  expected constants (catch a $4.99-for-$44.99 typo before it goes live).
+- Delete the 4 placeholder docs — GATE: do NOT delete until Phase 3 is deployed AND new catalog UI confirmed
+  working (web-admin dropdown reads catalog live; deleting earlier empties the prod dropdown). Delete via
+  Services UI (preferred) or one-off admin script after confirmation.
+- Status: PENDING
+
+#### Phase 6 — backend (post-Phase 2 hardening): structured logging + alerting on billing-critical signals
+- Source repo: savipets-web-admin
+- Target repo: savipets-backend
+- Change: structured logs + alerts on: every adminPriceOverride use (who/amount/bookingId), every first-time
+  discount grant, every bizId mismatch rejection, every distanceMiles/pets[] bounds rejection. Log
+  pricingEngineVersion as a structured field on every create (filter disputes in Cloud Logging by version
+  without reading docs). Wire to existing alerting (Cloud Logging metric + alert).
+- Status: PENDING
+
+#### Phase 7 — backend (separate initiative, NOT part of this plan's phases): Square → Stripe migration
+- Source repo: savipets-web-admin
+- Target repo: savipets-backend
+- Note: the Phase 2 applePayments.ts fix (read price from booking doc) closes the fabrication hole on Square
+  WITHOUT touching processor choice — migration-agnostic, stands alone. Later: replace Square with Stripe;
+  Apple Pay moves to `STPApplePayContext` via Stripe SDK; `applePayments.ts` is deleted. Same Apple Pay UX,
+  one processor. File when prioritized — does NOT block any phase above.
+- Status: PENDING
+
+#### Post-Phase-5 future TODO (name now, not a blocker): Mobile catalog cache invalidation
+- iOS/Android cache the catalog at session start. A mid-day price change shows a stale ESTIMATE until next
+  session (billing stays correct — server computes the real price). Add a TTL or push-invalidation. File as
+  a future cross-repo TODO when prioritized.
+
 ---
 
 ## COMPLETED

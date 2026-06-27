@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-06-26T22:15:00Z",
+  "last_updated": "2026-06-27T17:05:00Z",
   "note": "Claude writes this file. Never edit manually. Stop hook enforces freshness.",
   "items": [
     {
@@ -203,7 +203,57 @@
       "status": "PENDING",
       "repo": "savipets-backend",
       "note": "(1) Document serviceType+serviceName split in PLATFORM_ARCHITECTURE.md + contracts.md; field rule: serviceName immutable after create (frozen snapshot). (2) One-time backfill CF for Class-2 docs (serviceType is a human label, not ^[a-z0-9-]+$): set serviceName=label then serviceType=slugify via catalog; idempotent, skip docs with serviceName. Dirty analytics = sales problem, required. (3) Square/invoice line-item descriptions must read serviceName ?? humanize(serviceType). Design: savipets-web-admin/docs/architecture/SERVICE_NAMING.md."
+    },
+    {
+      "id": "WEBADMIN-CATALOG-DROPDOWN-FIX",
+      "status": "DONE",
+      "done_at": "2026-06-27",
+      "repo": "savipets-web-admin",
+      "commit": "pending",
+      "note": "Catalog SSOT plan Phase 0. (0a) BasicBookingFields service Select now binds to unique serviceId (was serviceType — two catalog walks share 'dog-walking' slug, so picking 30min returned 60min). serviceType + serviceName written to hidden form fields via handleServiceChange(serviceId). (0b) Deduped AdminBookingCreate: removed inline interface in src/types/index.ts, re-exported from features/bookings/types/bookings.types.ts. Build clean, 427 tests pass."
+    },
+    {
+      "id": "BACKEND-SERVICE-VALIDATORS",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "Catalog SSOT Phase 1 (must deploy BEFORE web-admin Phase 3). Extend service.validators.ts serviceFormSchema + updateServiceSchema with category, pricingModel, pricingParams (discriminated by model), shortNoticeSurcharge, shortNoticeWindowHours, firstTimeClientDiscountPct. Without this web-admin's new fields are silently stripped by .parse(). Deploy: firebase deploy --only functions:createService,functions:updateService. Full spec: CROSS_REPO_TODOS.md [2026-06-27]."
+    },
+    {
+      "id": "BACKEND-CREATEBOOKING-CALLABLE",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "Catalog SSOT Phase 2 (load-bearing security). New pricingEngine.ts (flat/tiered/distance-based + surcharge + first-time discount, ENGINE_VERSION='v1' + Jest snapshot test) + createBooking.ts onCall + createRecurringBooking, exported from index.ts. applePayments.ts:66 reads price from booking doc (null-safe retriable, never $0). MANDATORY hardening: isAdmin from token.role; clientId from auth.uid (admin-on-behalf branch); bizId from caller token; sitterId admin-only; serviceId format+not-found; paymentMethod allowlist; adminPriceOverride claim check (!= null, bounds 0-10000); distanceMiles 0.1-500; pets[] 1-10; addOnIds<=10 + catalog lookup; scheduledDate type+60s-tolerance+1yr; free-text 1000 cap; App Check; isActive guard; requiresApproval->reject; first-time-discount + idempotency + booking write in ONE atomic transaction (24h TTL); pricingEngineVersion on doc. NO firestore.rules change here (deferred to Phase 4b). Deploy: firebase deploy --only functions:createBooking,functions:createRecurringBooking,functions:processApplePayPayment. Full spec: CROSS_REPO_TODOS.md."
+    },
+    {
+      "id": "IOS-CATALOG-CALLABLE",
+      "status": "PENDING",
+      "repo": "savipets-ios",
+      "note": "Catalog SSOT Phase 4 (after Phase 1+2 live). Fetch services at session start (reuse RemoteConfigManager.swift:50 pattern), cache for session. BookingModels.swift/ServiceOptionsData/TransportationType display-only (no prices). BookingCRUDService.swift + RecurringBookingService.swift call createBooking callable; delete BookingPriceCalculator price logic. Tag callable bookings createdVia:'callable' (Phase 4b gate). App Store slow channel."
+    },
+    {
+      "id": "ANDROID-CATALOG-CALLABLE",
+      "status": "PENDING",
+      "repo": "savipets-android",
+      "note": "Catalog SSOT Phase 4 (after Phase 1+2 live). Add catalog fetch at app init (none today), cache for session. ServiceOptionsData.kt/TransportationType.kt display-only. FirebaseBookingRepository.kt + RecurringSeriesRepositoryImpl.kt call callable; remove BookingPriceCalculator.kt price logic. Tag createdVia:'callable'. Play Store."
+    },
+    {
+      "id": "BACKEND-BOOKING-RULES-LOCKDOWN",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "Catalog SSOT Phase 4b — closes price-fabrication hole. ONLY after BOTH mobile callable builds live for all users. GATE: (a) hard force-update/min-version, or (b) legacy direct-writes <1% of creates over trailing 7 days (measure missing createdVia:'callable'). firestore.rules: block client serviceBookings + recurringSeries/Batches create (callable uses Admin SDK, bypasses rules); keep client cancel/update-own. AUDIT UPDATE RULES: client update on own booking must forbid price/billing mutation. Deploy: firebase deploy --only firestore:rules."
+    },
+    {
+      "id": "BACKEND-CATALOG-SEED",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "Catalog SSOT Phase 5 (GATED on web-admin Phase 3 deployed + confirmed). Seed real menu, UNIQUE slugs, canonical prices: walks potty-break(15,$17.99)/quick-walk(30,$24.99)/quality-time(60,$44.99 CANONICAL)/walk-play(120,$75); sitting cat-care-30($25)/cat-care-60($45)/birds-care-30($28.95)/critter-care-30($28.95); overnight tiered [1-6 $140,7-12 $130,13+ $120]; transport pet-taxi(base$35/5mi/$1.50mi/$10 pet)/pet-express($350+$2.25/mi)/shuttle($250+$0.75/mi)/flight-companion($1000+$0.50/mi). Read-back verify every doc matches seed constants. Delete 4 placeholder docs ONLY after Phase 3 confirmed (dropdown reads catalog live)."
+    },
+    {
+      "id": "BACKEND-PRICING-LOGGING",
+      "status": "PENDING",
+      "repo": "savipets-backend",
+      "note": "Catalog SSOT Phase 6 (post-Phase 2). Structured logs + alerts: every adminPriceOverride use (who/amount/bookingId), first-time discount grant, bizId mismatch rejection, distanceMiles/pets[] bounds rejection. Log pricingEngineVersion as structured field on every create. Wire to existing Cloud Logging metric + alert."
     }
   ],
-  "last_updated": "2026-06-26T23:58:00Z"
+  "last_updated": "2026-06-27T17:05:00Z"
 }
