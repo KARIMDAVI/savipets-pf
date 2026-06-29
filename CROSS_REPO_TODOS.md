@@ -6,6 +6,174 @@ Shared handoff log for all SaviPets repos.
 
 ## PENDING
 
+### [2026-06-29] CROSS-REPO-PETS-PATH-CORRECTION — Align client/web-admin pet data paths to users/{userId}/pets
+- Triggered by: Split-brain Firestore pet paths discovery (mobile using artifacts subcollection, web-admin failing to find pets)
+- Source repo: savipets-web-admin
+- Target repos: savipets-backend, savipets-ios, savipets-android, savipets-web-admin
+- Priority: HIGH
+- Files:
+  - `savipets-backend`: `firestore.rules`, `storage.rules`, `functions/src/features/bookings/triggers/onServiceBookingWrite.ts`, `functions/src/features/users/api/deleteUserData.ts`, `functions/src/savipets-core/services/users/user.service.ts`
+  - `savipets-ios`: `SaviPets/Services/PetDataService.swift`
+  - `savipets-android`: `app/src/main/java/com/savipets/app/data/firebase/FirebasePetRepository.kt`
+  - `savipets-web-admin`: `src/services/users/UserQueryService.ts`
+- Changes:
+  1. **STEP 1 — Deploy Backend Rules & Functions (savipets-backend)**:
+     - Update `firestore.rules` to allow `read, write, list` on `/users/{userId}/pets/{petId}` and its subcollections (like `healthLog`) for owners and admins.
+     - Update `storage.rules` to allow uploads/reads under `/users/{userId}/pets/...` profiles/photos.
+     - Update backend booking triggers and deletion APIs to lookup/delete from both paths during migration or cleanly switch over.
+     - Deploy backend rules, storage rules, and updated functions first.
+  2. **STEP 2 — Run Data Migration Script**:
+     - Run a migration script using the Admin SDK to copy all existing pet documents (31 documents for 19 users) from the incorrect `artifacts/` subcollections (`artifacts/1:367657554735:ios:05871c65559a6a40b007da/users/{userId}/pets` and `artifacts/1:367657554735:ios:a01191656140289eb007da/users/{userId}/pets`) to the correct path `users/{userId}/pets`.
+     - *Timing*: Execute this script **after rules are deployed but before client updates ship**. Because the Admin SDK bypasses security rules, the script works either way, but having the data migrated prior to client deployment guarantees there is zero downtime/gap when the new clients start reading the new path.
+  3. **STEP 3 — Migrate Client Applications (savipets-ios, savipets-android, savipets-web-admin)**:
+     - Update `savipets-ios` (`PetDataService.swift`): remove `AppConstants.swift` `appId` from this path, write/read to `users/{userId}/pets`.
+     - Update `savipets-android` (`FirebasePetRepository.kt`): write/read to `users/{userId}/pets`.
+     - Update `savipets-web-admin` (`UserQueryService.ts`): modify `getUserPets` to fetch from `users/{userId}/pets` (reverting the temporary root-collection query fallback).
+     - Deploy the client updates in the same deployment window.
+  4. **STEP 4 — Cleanup Legacy Rules**:
+     - Once legacy client versions are phased out, remove the `artifacts/.../pets` rules from `firestore.rules` and `storage.rules`.
+- Status: PENDING
+
+### [2026-06-29] BACKEND-NOTIFICATION-PIPELINE-PHASE-2 — Decouple triggers & introduce persistent Notification Pipeline
+- Triggered by: Cloud Function latency alerts (exceeding 2s/5s thresholds for `notifyOwnerOnVisitStatusChange` / `notifyownervisitstatuschange`)
+- Source repo: savipets-backend (diagnosis & refactoring)
+- Target repo: savipets-backend
+- Files: 
+  - `functions/src/features/visits/triggers/notifyOwnerOnVisitStatusChange.ts`
+  - `functions/src/features/visits/triggers/notifyOwnerOnVisitReportAvailable.ts`
+  - `functions/src/features/bookings/triggers/notifySitterOnVisitStatusChange.ts`
+  - `functions/src/features/bookings/triggers/notifySitterOnAssignment.ts`
+  - `functions/src/email/NotificationModel.ts`
+  - `functions/src/email/NotificationRepository.ts`
+  - `functions/src/email/NotificationDispatcher.ts`
+  - `functions/src/email/NotificationService.ts`
+  - `functions/src/email/templates/sitter.ts`
+  - `functions/src/email/providers/smtp.ts`
+- Changes:
+  1. Implemented **NotificationModel**, **NotificationRepository**, **NotificationDispatcher**, and **NotificationService** boundaries under `functions/src/email/`.
+  2. Setup `notifications/` collection as the single source of truth for all email and push notifications, logging state, attempts, and providers.
+  3. Decoupled all 4 core triggers from direct email/push dispatches, converting them to emit versioned `DomainEvent` objects via `NotificationService.sendEvent()`.
+  4. Implemented atomic, channel-aware idempotency check: `SHA-256(eventId + recipientId + channel)`.
+  5. Implemented `createInAppInboxNotification` inside the dispatcher to write legacy user-facing inbox docs (`kind: "inbox"`), maintaining 100% client backward compatibility.
+- Deploy: `firebase deploy --only functions`
+- Status: **DONE (code, UNDEPLOYED) 2026-06-29** — fully implemented Phase 2; tsc builds successfully; all 212 tests pass; eslint formatting verified clean.
+
+### [2026-06-28] WEBADMIN-CATALOG-CALLABLE — route single admin bookings through createBooking
+- Triggered by: Catalog-SSOT Phase 3 (web-admin caller migration); backend enrichment commit in savipets-backend
+- Source repo: savipets-backend (decision + callable enrichment)
+- Target repo: savipets-web-admin
+- Priority: HIGH — load-bearing security migration (server price authority)
+- Status: **DONE (code, UNDEPLOYED) 2026-06-28** — all 4 changes implemented; build clean; 427 tests pass; zero new lint.
+  - `createAdminBooking` now invokes `httpsCallable<>(functions,'createBooking')`; sends serviceId, pets,
+    scheduledDate(epoch ms), mapped paymentMethod, clientId, sitterId?, specialInstructions?, address
+    (flattened to string via formatAddress)?, duration, timeZoneIdentifier, idempotencyKey(crypto.randomUUID),
+    adminPriceOverride, isComp?. Sends NO price/clientName/scheduledTime/paymentStatus; no updateDoc backfill.
+  - paymentMethod map: cash→CASH, check→CHECK, comp→CASH+isComp:true+adminPriceOverride:0,
+    square/apple_pay→CARD, invoice→Unknown (interim — see BACKEND-CALLABLE-INVOICE-ENUM below).
+  - ENGINE PATH BLOCKED comment added; adminPriceOverride is the sole price path (comp ⇒ 0).
+  - Dead `createVisitDoc` removed (callable owns the visit txn). `createAdminRecurringBooking` unchanged with
+    a `// RECURRING:` comment. `serviceId` added to `AdminBookingCreate`; forwarded in useBookingFormSubmission.
+  - **DEPLOY GATE: do NOT `npm run deploy` until BACKEND-CREATEBOOKING-CALLABLE is deployed** — otherwise every
+    admin single-booking create throws functions/not-found.
+  - Two backend gaps surfaced during this migration — filed below: BACKEND-CALLABLE-SITTERNAME-DENORM and
+    BACKEND-CALLABLE-INVOICE-ENUM.
+
+### [2026-06-28] BACKEND-CALLABLE-SITTERNAME-DENORM — callable must denormalize sitterName
+- Triggered by: WEBADMIN-CATALOG-CALLABLE (web-admin Phase 3 migration)
+- Source repo: savipets-web-admin
+- Target repo: savipets-backend
+- File: `functions/src/features/bookings/createBooking.ts` (buildBookingDoc + visit write in the txn)
+- Change: callable denormalizes `clientName` but NOT `sitterName` — it only sets `sitterId`. Pre-callable
+  web-admin wrote `sitterName` onto both the booking and the visit doc via `getSitterName()`. Now an admin
+  booking with an assigned sitter has `sitterId` but no `sitterName` on either doc. Web-admin read sites use
+  `sitterName` (TimelineView, PayReportsSummary, RecurringVisitPreview, CreateBookingModal,
+  RecurringBookingScheduler) and CANNOT backfill (Option B forbids updateDoc on callable-authored docs).
+  Fix: when `sitterId` is present, resolve the sitter's name (users/{sitterId} or publicProfiles) and write
+  `sitterName` onto BOTH the booking and visit docs, mirroring `clientName`.
+- Deploy: `firebase deploy --only functions:createBooking`
+- Status: PENDING
+
+### [2026-06-28] BACKEND-CALLABLE-INVOICE-ENUM — add INVOICE to createBooking payment methods
+- Triggered by: WEBADMIN-CATALOG-CALLABLE (web-admin Phase 3 migration)
+- Source repo: savipets-web-admin
+- Target repo: savipets-backend
+- File: `functions/src/features/bookings/createBooking.ts` (createBookingSchema PAYMENT_METHODS)
+- Change: `PAYMENT_METHODS = [CASH, CHECK, CARD, Unknown]` has no INVOICE value, but the web-admin form
+  offers `invoice` as a first-class method. Web-admin currently maps invoice→Unknown (lossy — invoice
+  semantics + skipPaymentValidation intent erased). Add `INVOICE` to the enum and handle it (likely
+  skipPaymentValidation=true, paymentStatus=pending until the invoice is paid). After deploy, update
+  web-admin `mapPaymentMethod` invoice→INVOICE (in AdminBookingService.ts).
+- Deploy: `firebase deploy --only functions:createBooking`
+- Status: PENDING
+
+#### Original spec (retained for reference)
+- Decision (owner, 2026-06-28): Option **B — enrich server-side**. The callable now writes a FULLY
+  denormalized booking doc (clientName, duration, scheduledTime, timeZoneIdentifier, paymentStatus,
+  skipPaymentValidation). **No caller may `updateDoc` a callable-authored booking to backfill fields.**
+- File: `src/services/bookings/AdminBookingService.ts` (createAdminBooking single path only)
+- Changes:
+  1. Replace the direct `setDoc` in `createAdminBooking` (single, non-recurring) with a call to the
+     `createBooking` httpsCallable. Pass: serviceId, pets, scheduledDate (epoch ms), paymentMethod
+     (MAPPED — see #2), clientId, sitterId (if set), duration, timeZoneIdentifier, specialInstructions,
+     address, distanceMiles/nights (if applicable), adminPriceOverride (see #3), idempotencyKey (UUID v4).
+     Do NOT send price/clientName/scheduledTime/paymentStatus — the callable owns those.
+  2. paymentMethod mapping BEFORE invoke (callable enum is UPPERCASE, web-admin is lowercase):
+     `cash→CASH, check→CHECK, card→CARD, comp→CASH + adminPriceOverride: 0`. comp is NOT a callable
+     payment method — it is a zero-price override. Do not change the callable enum; fix the caller.
+  3. Pricing path: the engine throws "service is not priceable" for all 4 placeholder services (no
+     pricingModel/pricingParams until Phase 5 catalog seed). So **adminPriceOverride is the only valid
+     price path right now** — default the booking form to override/manual-price mode. Add comment:
+     `// ENGINE PATH BLOCKED: re-enable after Phase 5 catalog seed`.
+  4. Recurring: `createAdminRecurringBooking` STAYS direct-write — no `createRecurringBooking` callable
+     exists (backend skipped it, no consumer). Phase 3 migration = single bookings only. Add comment:
+     `// RECURRING: no callable — direct-write intentional, revisit Phase 4`.
+- Gotcha: comp bookings now carry paymentStatus:'pending' (callable hardcodes it) + skipPaymentValidation:true
+  (override set). If web-admin needs comp→paymentStatus:'waived' display, set it client-side AFTER read
+  in the transformer, NOT by patching the doc. Confirm with owner if 'pending' on comp is acceptable.
+- Deploy: backend `firebase deploy --only functions:createBooking` MUST be live before this web-admin
+  change ships (canonical deploy order: backend → web-admin).
+- Verify: admin-created single booking has clientName/duration/scheduledTime/paymentStatus present in
+  Firestore with NO second write; bookingTransformers reads hit real data not fallbacks; comp routes to
+  adminPriceOverride: 0.
+
+### [2026-06-28] Catalog-SSOT Phase 2 — createBooking callable + pricing engine — DONE (UNDEPLOYED)
+- 2026-06-28 ADDENDUM (enrichment for Phase 3, Option B): callable now writes a fully denormalized doc
+  so web-admin/iOS reads never hit fallbacks and no caller patches the doc. Added to `buildBookingDoc`:
+  `clientName` (resolved from client user doc: name||email||"Unknown Client"), `duration`
+  (input, default 30), `scheduledTime` ("h:mm a" DERIVED server-side from scheduledDate in the booking's
+  tz — NOT client-trusted, fixes BOOKING-CARD-SCHEDULEDTIME), `timeZoneIdentifier` (input, default
+  America/New_York, IANA-validated), `paymentStatus: "pending"` (hardcoded), `skipPaymentValidation`
+  (= override used). New optional schema fields: `duration`, `timeZoneIdentifier`. New exported pure
+  helpers + 9 tests (resolveTimeZone/formatScheduledTime/resolveClientName). createBooking suite 32 green;
+  tsc + eslint clean. runBookingTransaction signature UNCHANGED (clientName resolved inside the txn from
+  the existing userSnap read) — emulator tests unaffected.
+- Source/Target repo: savipets-backend
+- Status: DONE 2026-06-28 (code + tests merged; NOT yet deployed)
+- What shipped:
+  - NEW `functions/src/features/bookings/pricingEngine.ts` — pure flat/tiered/distance-based engine
+    + short-notice surcharge + first-time discount. `ENGINE_VERSION="v1"` + Jest snapshot test pins
+    per-model output (formula drift without a version bump fails loudly).
+  - NEW `functions/src/features/bookings/createBooking.ts` (onCall) — server-authoritative price.
+    Token-derived authz (admin-only clientId/sitterId/adminPriceOverride), strict Zod schema, UUID-v4
+    idempotency, atomic booking(+visit) transaction with first-time-discount accounting, add-ons summed
+    from the catalog. Exported from `index.ts`. Audit log on override/first-time grant.
+  - 41 new unit tests; full unit suite 212 green. tsc clean; new files lint clean.
+- SCOPE REDUCED (owner decision 2026-06-27, via AskUserQuestion):
+  - `createRecurringBooking` SKIPPED — no consumer yet; build when a client routes recurring server-side.
+  - applePayments.ts charge-site fix + interim catalog-price-floor DROPPED — see threat-model correction
+    below. Only a DEPRECATED banner (TODO #7 Stripe) was added; internals untouched.
+- THREAT-MODEL CORRECTION: the earlier "[CERTAIN] live vuln in applePayments.ts:66" claim was WRONG.
+  `processApplePayPayment` is undeployed (commented out at `index.ts:167`). The deployed charge path,
+  `createSquareInvoice`, already verifies ownership + recomputes + rejects client/stored mismatch. The
+  real residual hole is client-authored booking `price` via direct setDoc — which this callable closes
+  server-side and Doc 2 Phase 4b (rules lockdown) severs. `pricing-authority.md` threat model corrected.
+- `enforceAppCheck: false` on the callable to match SEC-APPC platform posture (App Check OFF until iOS
+  ships DeviceCheck; enabling unilaterally would reject all current mobile clients on adoption).
+- Deploy (when ready): `firebase deploy --only functions:createBooking` — do NOT include
+  `processApplePayPayment` (undeployed) or `createRecurringBooking` (not built).
+- Next: IOS-CATALOG-CALLABLE + ANDROID-CATALOG-CALLABLE route through this callable (Doc 2); then
+  BACKEND-BOOKING-RULES-LOCKDOWN (Phase 4b) severs the direct-write path.
+
 ### [2026-06-25] Firestore indexes required for AI sitter scoring
 - Triggered by: src/services/bookings/BookingAssignmentService.ts — selectBestSitter()
 - Source repo: savipets-web-admin
@@ -328,6 +496,35 @@ Shared handoff log for all SaviPets repos.
   `firstTimeClientDiscountPct`. CRITICAL: without this, web-admin's new fields are silently stripped by
   `.parse()` before write.
 - Deploy: `firebase deploy --only functions:createService,functions:updateService`
+- Status: DONE 2026-06-27 — committed `5491245`, pushed to origin/main; deploy reported successful for
+  `createService`+`updateService` (savipets-72a88). Final web-admin field-persistence acceptance test
+  deferred to Phase 3 (web-admin must send the new fields). PLATFORM_ARCHITECTURE.md update deferred to
+  Phase 2 (Phase 1 is an additive validator change, not yet the server-side pricing-authority shift).
+  Implementation notes / decisions:
+  - All new fields are OPTIONAL and ADDITIVE. Legacy flat price fields (`basePrice`,
+    `pricePerAdditionalPet`, `petCountTiers`, `petSizeSurcharges`) retained as optional, and
+    `duration` relaxed from `min(1)` to `min(0)` (canonical schema: "0 when derived" for
+    distance-based). This keeps current web-admin service CRUD + the 4 placeholder docs valid
+    BEFORE web-admin Phase 3 ships.
+  - `pricingParams` is NOT a top-level `z.discriminatedUnion` — that breaks `updateServiceSchema`'s
+    `.partial()`/`.merge()`. Instead a shared `superRefine(refinePricingParams)` enforces per-model
+    requirements and NO-OPS when `pricingModel` is absent (legacy create / partial update). Rules:
+    `flat` → `pricingParams.basePrice`; `tiered` → non-empty `pricingParams.nightTiers`;
+    `distance-based` → `basePrice` + `baseMilesCovered` + `perMileRate`.
+  - `nightTiers` schema: `{upTo: int|null (null = open-ended top tier), price}` (per-night rate).
+  - 11 colocated tests in `__tests__/service.validators.test.ts` cover backward compat, field
+    persistence, per-model rejection, and update partial semantics. `tsc --noEmit` + `eslint` clean.
+
+### [2026-06-27] Stamp superseded original plan doc with split + Phase-1 status
+- Triggered by: backend Phase 1 completion (commit `5491245`); boundary-blocked this session.
+- Source repo: savipets-backend
+- Target repo: savipets-web-admin
+- File: `docs/superpowers/plans/bookings-overhaul.md`
+- Change: this raw original plan has NO phase-status tracking and has been SUPERSEDED by the split docs
+  `savipets-backend/docs/plans/{pricing-authority.md,client-lockdown.md}`. Add a header banner pointing to
+  the two split docs as the live source, and note Phase 0 + Phase 1 are DONE. Optional: archive/relocate.
+  A backend session cannot edit web-admin files, so this was deferred here.
+- Deploy command: none (docs only).
 - Status: PENDING
 
 #### Phase 2 — backend: createBooking callable + pricing engine + Square price trust (NO rules change here)
